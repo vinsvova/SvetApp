@@ -1,6 +1,7 @@
 package ru.svet.wifialert
 
 import android.annotation.SuppressLint
+import android.app.AlarmManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -12,40 +13,48 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.media.AudioAttributes
+import android.media.AudioManager
 import android.media.MediaPlayer
+import android.media.RingtoneManager
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 
 /**
- * Фоновый сервис: каждые SCAN_INTERVAL_MS запускает поиск Wi-Fi сетей.
- * Когда нужная сеть ПОЯВЛЯЕТСЯ (раньше её не было) — показывает уведомление
- * и проигрывает звук (res/raw/svet_sound.mp3). Повторно сработает только после того, как сеть пропадёт
- * и появится снова.
+ * Фоновый сервис: регулярно ищет Wi-Fi сети. Когда нужная сеть ПОЯВЛЯЕТСЯ —
+ * будит экран (полноэкранное оповещение, как у будильника), показывает уведомление
+ * и проигрывает звук res/raw/svet_sound.mp3.
+ *
+ * Для прошивок, которые усыпляют фон (Huawei, Xiaomi…), используются сразу три механизма:
+ *  - partial wake lock: процессор не засыпает;
+ *  - Wi-Fi lock: Wi-Fi не отключается при выключенном экране;
+ *  - AlarmManager: будит сервис раз в минуту, даже если обычный таймер «заморозили».
  */
 class WifiWatcherService : Service() {
 
     companion object {
         private const val TAG = "SvetWatcher"
         private const val CH_SERVICE = "svc"
-        private const val CH_ALERT = "alert2"
+        private const val CH_ALERT = "alarm3"
         private const val ID_SERVICE = 1
-        private const val ID_ALERT = 2
+        const val ID_ALERT = 2
 
-        /** Как часто сканировать. Android разрешает ~4 скана за 2 минуты. */
         private const val SCAN_INTERVAL_MS = 30_000L
-
-        /** Сколько сканов подряд сеть должна отсутствовать, чтобы считать её пропавшей. */
+        private const val ALARM_INTERVAL_MS = 60_000L
         private const val MISSES_TO_RESET = 3
 
         const val ACTION_TEST = "ru.svet.wifialert.TEST"
+        const val ACTION_STOP_SOUND = "ru.svet.wifialert.STOP_SOUND"
+        private const val ACTION_TICK = "ru.svet.wifialert.TICK"
+        const val EXTRA_DELAY_MS = "delay"
 
         fun start(ctx: Context) {
             ContextCompat.startForegroundService(ctx, Intent(ctx, WifiWatcherService::class.java))
@@ -55,17 +64,24 @@ class WifiWatcherService : Service() {
             ctx.stopService(Intent(ctx, WifiWatcherService::class.java))
         }
 
-        fun test(ctx: Context) {
+        fun test(ctx: Context, delayMs: Long = 0) {
             ContextCompat.startForegroundService(
-                ctx, Intent(ctx, WifiWatcherService::class.java).setAction(ACTION_TEST)
+                ctx, Intent(ctx, WifiWatcherService::class.java)
+                    .setAction(ACTION_TEST).putExtra(EXTRA_DELAY_MS, delayMs)
             )
+        }
+
+        fun stopSound(ctx: Context) {
+            runCatching {
+                ctx.startService(Intent(ctx, WifiWatcherService::class.java).setAction(ACTION_STOP_SOUND))
+            }
         }
     }
 
     private lateinit var wifi: WifiManager
     private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
     private val handler = Handler(Looper.getMainLooper())
-
     private var player: MediaPlayer? = null
 
     private var networkVisible = false
@@ -73,13 +89,8 @@ class WifiWatcherService : Service() {
 
     private val scanLoop = object : Runnable {
         override fun run() {
-            try {
-                @Suppress("DEPRECATION")
-                val started = wifi.startScan()
-                if (!started) checkResults() // скан отклонён (лимит) — берём последние известные результаты
-            } catch (e: Exception) {
-                Log.w(TAG, "startScan failed", e)
-            }
+            handler.removeCallbacks(this)
+            requestScan()
             handler.postDelayed(this, SCAN_INTERVAL_MS)
         }
     }
@@ -88,17 +99,30 @@ class WifiWatcherService : Service() {
         override fun onReceive(context: Context, intent: Intent) = checkResults()
     }
 
+    private val tickReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            scheduleTick()
+            handler.post(scanLoop) // перезапускаем цикл, если его «заморозили»
+        }
+    }
+
+    // ---------- Жизненный цикл ----------
+
     override fun onCreate() {
         super.onCreate()
         wifi = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
         createChannels()
         goForeground()
 
-        // Держим процессор активным при выключенном экране, чтобы сканирование не засыпало
         val pm = getSystemService(POWER_SERVICE) as PowerManager
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Svet::Watcher").apply {
             setReferenceCounted(false)
             acquire()
+        }
+        @Suppress("DEPRECATION")
+        wifiLock = wifi.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "Svet::Wifi").apply {
+            setReferenceCounted(false)
+            runCatching { acquire() }
         }
 
         ContextCompat.registerReceiver(
@@ -106,26 +130,71 @@ class WifiWatcherService : Service() {
             IntentFilter(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION),
             ContextCompat.RECEIVER_EXPORTED // системный broadcast
         )
+        ContextCompat.registerReceiver(
+            this, tickReceiver, IntentFilter(ACTION_TICK), ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+        scheduleTick()
         handler.post(scanLoop)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         goForeground()
-        if (intent?.action == ACTION_TEST) alert()
-        return START_STICKY // система перезапустит сервис, если убьёт его
+        when (intent?.action) {
+            ACTION_TEST -> {
+                val delay = intent.getLongExtra(EXTRA_DELAY_MS, 0)
+                handler.postDelayed({ alert() }, delay)
+            }
+            ACTION_STOP_SOUND -> {
+                stopSound()
+                getSystemService(NotificationManager::class.java).cancel(ID_ALERT)
+            }
+        }
+        return START_STICKY
     }
 
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
         runCatching { unregisterReceiver(scanReceiver) }
+        runCatching { unregisterReceiver(tickReceiver) }
+        runCatching { (getSystemService(ALARM_SERVICE) as AlarmManager).cancel(tickIntent()) }
         stopSound()
+        wifiLock?.let { if (it.isHeld) it.release() }
         wakeLock?.let { if (it.isHeld) it.release() }
         super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    // ---------- Логика обнаружения ----------
+    // ---------- Будильник-страховка ----------
+
+    private fun tickIntent(): PendingIntent = PendingIntent.getBroadcast(
+        this, 10, Intent(ACTION_TICK).setPackage(packageName),
+        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+    )
+
+    private fun scheduleTick() {
+        val am = getSystemService(ALARM_SERVICE) as AlarmManager
+        val at = SystemClock.elapsedRealtime() + ALARM_INTERVAL_MS
+        val exactAllowed = Build.VERSION.SDK_INT < 31 || am.canScheduleExactAlarms()
+        runCatching {
+            if (exactAllowed) am.setExactAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, at, tickIntent())
+            else am.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, at, tickIntent())
+        }
+    }
+
+    // ---------- Сканирование ----------
+
+    private fun requestScan() {
+        try {
+            @Suppress("DEPRECATION")
+            val started = wifi.startScan()
+            Prefs.logScanRequest(this, started)
+            if (!started) checkResults() // лимит сканов: берём последние известные результаты
+        } catch (e: Exception) {
+            Log.w(TAG, "startScan failed", e)
+            Prefs.logError(this, "scan: ${e.message}")
+        }
+    }
 
     @SuppressLint("MissingPermission")
     private fun checkResults() {
@@ -135,11 +204,12 @@ class WifiWatcherService : Service() {
         val results = try {
             wifi.scanResults
         } catch (e: SecurityException) {
-            Log.w(TAG, "No permission for scan results", e)
+            Prefs.logError(this, "нет разрешения на список сетей")
             return
         }
-
-        val found = results.any { ssidOf(it).equals(target, ignoreCase = true) }
+        val names = results.map { ssidOf(it) }.filter { it.isNotEmpty() }.distinct()
+        val found = names.any { it.equals(target, ignoreCase = true) }
+        Prefs.logResults(this, names, found)
 
         if (found) {
             misses = 0
@@ -169,23 +239,74 @@ class WifiWatcherService : Service() {
     // ---------- Срабатывание ----------
 
     private fun alert() {
+        Prefs.logAlert(this)
+        wakeScreen()
         showAlertNotification()
         playSound()
+        // Прямой запуск экрана оповещения (Huawei и Android < 10 это обычно разрешают)
+        runCatching {
+            startActivity(
+                Intent(this, AlarmActivity::class.java)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_USER_ACTION)
+            )
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun wakeScreen() {
+        runCatching {
+            (getSystemService(POWER_SERVICE) as PowerManager).newWakeLock(
+                PowerManager.FULL_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP or
+                    PowerManager.ON_AFTER_RELEASE,
+                "Svet::Screen"
+            ).acquire(15_000)
+        }
     }
 
     private fun playSound() {
         stopSound()
-        // Канал "будильник": звук слышен при выключенном экране и в беззвучном режиме
+        val audio = getSystemService(AUDIO_SERVICE) as AudioManager
+        // Если громкость будильника почти на нуле — поднимаем до 80%, иначе ничего не услышать
+        runCatching {
+            val max = audio.getStreamMaxVolume(AudioManager.STREAM_ALARM)
+            if (audio.getStreamVolume(AudioManager.STREAM_ALARM) < max / 3) {
+                audio.setStreamVolume(AudioManager.STREAM_ALARM, (max * 0.8).toInt().coerceAtLeast(1), 0)
+            }
+        }
         val attrs = AudioAttributes.Builder()
             .setUsage(AudioAttributes.USAGE_ALARM)
             .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
             .build()
-        player = MediaPlayer.create(this, R.raw.svet_sound, attrs, 0)?.apply {
-            setWakeMode(this@WifiWatcherService, PowerManager.PARTIAL_WAKE_LOCK)
-            setOnCompletionListener { stopSound() }
-            start()
+
+        player = try {
+            MediaPlayer().apply {
+                setAudioAttributes(attrs)
+                resources.openRawResourceFd(R.raw.svet_sound).use { afd ->
+                    setDataSource(afd.fileDescriptor, afd.startOffset, afd.length)
+                }
+                setWakeMode(this@WifiWatcherService, PowerManager.PARTIAL_WAKE_LOCK)
+                setOnCompletionListener { stopSound() }
+                prepare()
+                start()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "mp3 failed", e)
+            Prefs.logError(this, "звук: ${e.message}")
+            playFallback(attrs)
+            null
         }
-        if (player == null) Log.e(TAG, "Не удалось открыть звуковой файл")
+    }
+
+    private fun playFallback(attrs: AudioAttributes) {
+        runCatching {
+            val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+                ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+            RingtoneManager.getRingtone(this, uri)?.apply {
+                audioAttributes = attrs
+                play()
+                handler.postDelayed({ stop() }, 6_000)
+            }
+        }
     }
 
     private fun stopSound() {
@@ -205,9 +326,10 @@ class WifiWatcherService : Service() {
         )
         nm.createNotificationChannel(
             NotificationChannel(CH_ALERT, "Свет дали", NotificationManager.IMPORTANCE_HIGH).apply {
-                description = "Уведомление о появлении Wi-Fi сети"
+                description = "Оповещение о появлении Wi-Fi сети"
                 enableVibration(true)
-                setSound(null, null) // звук — это голосовая фраза
+                setSound(null, null) // звук играет сервис
+                setBypassDnd(true)
                 lockscreenVisibility = Notification.VISIBILITY_PUBLIC
             }
         )
@@ -243,27 +365,28 @@ class WifiWatcherService : Service() {
     }
 
     private fun showAlertNotification() {
+        val fullScreen = PendingIntent.getActivity(
+            this, 1, Intent(this, AlarmActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_USER_ACTION),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        val stop = PendingIntent.getService(
+            this, 2, Intent(this, WifiWatcherService::class.java).setAction(ACTION_STOP_SOUND),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
         val n = NotificationCompat.Builder(this, CH_ALERT)
             .setSmallIcon(R.drawable.ic_light)
-            .setContentTitle("Свет")
+            .setContentTitle("💡 Свет")
             .setContentText(Prefs.PHRASE)
             .setStyle(NotificationCompat.BigTextStyle().bigText(Prefs.PHRASE))
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setPriority(NotificationCompat.PRIORITY_MAX)
             .setCategory(NotificationCompat.CATEGORY_ALARM)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setFullScreenIntent(fullScreen, true) // будит экран, как будильник
+            .setContentIntent(fullScreen)
+            .addAction(0, "OK", stop)
             .setAutoCancel(true)
-            .setContentIntent(openAppIntent())
             .build()
-        runCatching {
-            getSystemService(NotificationManager::class.java).notify(ID_ALERT, n)
-        }
-        // Включаем экран на пару секунд, чтобы уведомление было видно
-        @Suppress("DEPRECATION")
-        runCatching {
-            (getSystemService(POWER_SERVICE) as PowerManager).newWakeLock(
-                PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
-                "Svet::Screen"
-            ).acquire(5_000)
-        }
+        runCatching { getSystemService(NotificationManager::class.java).notify(ID_ALERT, n) }
     }
 }

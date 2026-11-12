@@ -2,6 +2,8 @@ package ru.svet.wifialert
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.NotificationManager
+import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.location.LocationManager
@@ -65,6 +67,24 @@ class MainActivity : AppCompatActivity() {
             // Сервис со слежением за местоположением нельзя запустить без разрешений
             if (hasCorePermissions()) WifiWatcherService.test(this)
             else toast("Сначала нажмите «Начать слежение» и выдайте разрешения")
+        }
+        findViewById<Button>(R.id.testDelayed).setOnClickListener {
+            if (hasCorePermissions()) {
+                WifiWatcherService.test(this, 15_000)
+                toast("Выключите экран кнопкой питания и ждите 15 секунд")
+            } else toast("Сначала нажмите «Начать слежение» и выдайте разрешения")
+        }
+        findViewById<Button>(R.id.fullScreen).setOnClickListener { requestFullScreen() }
+        findViewById<Button>(R.id.notifSettings).setOnClickListener {
+            startActivity(
+                Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                    .putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+            )
+        }
+        findViewById<Button>(R.id.refresh).setOnClickListener { refresh() }
+        findViewById<Button>(R.id.huawei).apply {
+            if (isHuawei()) visibility = android.view.View.VISIBLE
+            setOnClickListener { openHuaweiLaunchSettings() }
         }
         findViewById<Button>(R.id.battery).setOnClickListener { requestIgnoreBattery() }
         findViewById<Button>(R.id.bgLocation).setOnClickListener { requestBackgroundLocation() }
@@ -150,6 +170,44 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
+    private fun isHuawei() = Build.MANUFACTURER.lowercase().let { it.contains("huawei") || it.contains("honor") }
+
+    /** Экран «Запуск приложений» в Huawei/Honor (у разных версий EMUI он называется по-разному). */
+    private fun openHuaweiLaunchSettings() {
+        toast("Найдите «Будет свет», отключите «Управлять автоматически» и включите все 3 переключателя")
+        val candidates = listOf(
+            ComponentName("com.huawei.systemmanager", "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity"),
+            ComponentName("com.huawei.systemmanager", "com.huawei.systemmanager.appcontrol.activity.StartupAppControlActivity"),
+            ComponentName("com.huawei.systemmanager", "com.huawei.systemmanager.optimize.process.ProtectActivity"),
+            ComponentName("com.hihonor.systemmanager", "com.hihonor.systemmanager.startupmgr.ui.StartupNormalAppListActivity"),
+        )
+        for (c in candidates) {
+            val ok = runCatching { startActivity(Intent().setComponent(c)) }.isSuccess
+            if (ok) return
+        }
+        startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).setData(Uri.parse("package:$packageName")))
+    }
+
+    private fun canFullScreen(): Boolean =
+        Build.VERSION.SDK_INT < 34 || getSystemService(NotificationManager::class.java).canUseFullScreenIntent()
+
+    private fun requestFullScreen() {
+        if (Build.VERSION.SDK_INT >= 34 && !canFullScreen()) {
+            runCatching {
+                startActivity(
+                    Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT)
+                        .setData(Uri.parse("package:$packageName"))
+                )
+            }
+        } else {
+            // На старых Android разрешение даётся автоматически; на Huawei надо проверить уведомления
+            startActivity(
+                Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                    .putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+            )
+        }
+    }
+
     private fun refresh() {
         val on = Prefs.enabled(this)
         toggle.text = if (on) "Остановить слежение" else "Начать слежение"
@@ -159,8 +217,10 @@ class MainActivity : AppCompatActivity() {
         if (Build.VERSION.SDK_INT >= 33)
             lines += check("Уведомления", granted(Manifest.permission.POST_NOTIFICATIONS))
         lines += check("Без ограничений батареи", isIgnoringBattery())
+        lines += check("Включение экрана при оповещении", canFullScreen())
         lines += check("Автозапуск после перезагрузки", granted(Manifest.permission.ACCESS_BACKGROUND_LOCATION))
         status.text = lines.joinToString("\n")
+        findViewById<TextView>(R.id.diag).text = Prefs.diagnostics(this)
     }
 
     private fun check(name: String, ok: Boolean) = (if (ok) "✅ " else "⚠️ ") + name

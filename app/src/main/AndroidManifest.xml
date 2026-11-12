@@ -23,6 +23,11 @@
     <!-- Уведомления -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- Будить экран, как будильник -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.DISABLE_KEYGUARD" />
+
     <application
         android:allowBackup="true"
         android:icon="@drawable/ic_light"
@@ -39,6 +44,16 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <activity
+            android:name=".AlarmActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:showWhenLocked="true"
+            android:taskAffinity=".alarm"
+            android:turnScreenOn="true"
+            tools:targetApi="27" />
 
         <service
             android:name=".WifiWatcherService"

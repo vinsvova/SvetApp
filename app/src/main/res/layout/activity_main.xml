@@ -46,6 +46,13 @@
             android:layout_height="wrap_content"
             android:text="Проверить звук и уведомление" />
 
+        <Button
+            android:id="@+id/testDelayed"
+            style="@style/Widget.Material3.Button.OutlinedButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Тест через 15 секунд (выключите экран)" />
+
         <TextView
             android:id="@+id/status"
             android:layout_width="match_parent"
@@ -68,5 +75,48 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:text="Разрешить автозапуск после перезагрузки" />
+        <Button
+            android:id="@+id/fullScreen"
+            style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Разрешить включать экран (полноэкранные оповещения)" />
+
+        <Button
+            android:id="@+id/huawei"
+            style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Huawei: разрешить работу в фоне (запуск приложений)"
+            android:visibility="gone" />
+
+        <Button
+            android:id="@+id/notifSettings"
+            style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Настройки уведомлений (баннеры, экран блокировки)" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:text="Диагностика"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/diag"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:textIsSelectable="true"
+            android:textSize="13sp" />
+
+        <Button
+            android:id="@+id/refresh"
+            style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Обновить" />
     </LinearLayout>
 </ScrollView>
