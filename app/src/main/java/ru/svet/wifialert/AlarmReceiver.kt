@@ -56,6 +56,15 @@ class AlarmReceiver : BroadcastReceiver() {
         val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
         pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, HUAWEI_SAFE_TAG).acquire(20_000)
 
+        if (intent.action == ACTION_TEST) {
+            // Право открыть окно из фона есть именно сейчас, пока обрабатывается будильник
+            runCatching {
+                context.startActivity(
+                    Intent(context, AlarmActivity::class.java)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_USER_ACTION)
+                )
+            }
+        }
         val serviceAction = when (intent.action) {
             ACTION_TEST -> WifiWatcherService.ACTION_TEST
             ACTION_TICK -> {

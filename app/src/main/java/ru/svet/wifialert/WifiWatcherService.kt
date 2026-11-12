@@ -278,7 +278,7 @@ class WifiWatcherService : Service() {
         val now = SystemClock.elapsedRealtime()
         val shortBlip = lostAt != 0L && now - lostAt < MIN_OUTAGE_MS
         Prefs.logEvent(this, "сеть появилась ($source)" + if (shortBlip) ", кратковременно — без оповещения" else "")
-        if (!shortBlip) alert()
+        if (!shortBlip) alertViaAlarm()
         updateServiceNotification()
     }
 
@@ -302,7 +302,29 @@ class WifiWatcherService : Service() {
 
     // ---------- Срабатывание ----------
 
+    private var alertPending = false
+
+    /**
+     * Оповещение через системный будильник (+1 с): только так Android/Huawei
+     * разрешают открыть окно поверх экрана блокировки из фона — тот же путь, что у теста.
+     * Если будильник почему-то не сработал за 6 с — оповещаем напрямую.
+     */
+    private fun alertViaAlarm() {
+        alertPending = true
+        (getSystemService(POWER_SERVICE) as PowerManager)
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, AlarmReceiver.HUAWEI_SAFE_TAG)
+            .acquire(15_000)
+        AlarmReceiver.schedule(this, AlarmReceiver.ACTION_TEST, 1_000)
+        handler.postDelayed({
+            if (alertPending) {
+                Prefs.logEvent(this, "будильник не сработал — прямое оповещение")
+                alert()
+            }
+        }, 6_000)
+    }
+
     private fun alert() {
+        alertPending = false
         Prefs.logAlert(this)
         (getSystemService(POWER_SERVICE) as PowerManager)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, AlarmReceiver.HUAWEI_SAFE_TAG)
