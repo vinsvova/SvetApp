@@ -1,0 +1,5 @@
+<resources>
+    <style name="Theme.SvetApp" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">#F2A900</item>
+    </style>
+</resources>
