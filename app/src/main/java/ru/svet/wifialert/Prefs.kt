@@ -22,6 +22,12 @@ object Prefs {
     private const val KEY_CONN = "conn"
     private const val KEY_EVENTS = "events"
 
+    private const val KEY_STATE = "state"       // -1 неизвестно, 0 нет, 1 есть
+    private const val KEY_LOST_AT = "lost_at"   // когда сеть пропала (время, мс)
+    private const val KEY_OFF_SCANS = "off_scans"
+    private const val KEY_OFF_LAST = "off_last"
+    private const val KEY_SCREEN_OFF_AT = "screen_off_at"
+
     const val PHRASE = "Да, будет свет в вашем доме"
 
     private fun sp(ctx: Context) = ctx.getSharedPreferences(FILE, Context.MODE_PRIVATE)
@@ -31,6 +37,21 @@ object Prefs {
 
     fun enabled(ctx: Context): Boolean = sp(ctx).getBoolean(KEY_ENABLED, false)
     fun setEnabled(ctx: Context, value: Boolean) = sp(ctx).edit().putBoolean(KEY_ENABLED, value).apply()
+
+    fun state(ctx: Context): Int = sp(ctx).getInt(KEY_STATE, -1)
+    fun lostAt(ctx: Context): Long = sp(ctx).getLong(KEY_LOST_AT, 0)
+    fun saveState(ctx: Context, state: Int, lostAt: Long) =
+        sp(ctx).edit().putInt(KEY_STATE, state).putLong(KEY_LOST_AT, lostAt).apply()
+    fun resetState(ctx: Context) = saveState(ctx, -1, 0)
+
+    fun screenOff(ctx: Context) = sp(ctx).edit()
+        .putLong(KEY_SCREEN_OFF_AT, System.currentTimeMillis()).putInt(KEY_OFF_SCANS, 0).apply()
+
+    fun countScreenOffScan(ctx: Context) {
+        val p = sp(ctx)
+        p.edit().putInt(KEY_OFF_SCANS, p.getInt(KEY_OFF_SCANS, 0) + 1)
+            .putLong(KEY_OFF_LAST, System.currentTimeMillis()).apply()
+    }
 
     fun logScanRequest(ctx: Context, started: Boolean) =
         sp(ctx).edit().putLong(KEY_LAST_SCAN, System.currentTimeMillis()).putBoolean(KEY_SCAN_OK, started).apply()
@@ -69,6 +90,11 @@ object Prefs {
         val names = p.getString(KEY_LAST_NAMES, "") ?: ""
         lines += "Видны сети (свежие): ${names.ifEmpty { "—" }}"
         lines += "Нужная сеть найдена: ${if (p.getBoolean(KEY_LAST_FOUND, false)) "да" else "нет"}"
+        val offAt = p.getLong(KEY_SCREEN_OFF_AT, 0)
+        if (offAt > 0) {
+            lines += "Экран выключали: ${fmt(offAt)}, новых сканов в темноте: ${p.getInt(KEY_OFF_SCANS, 0)}" +
+                (p.getLong(KEY_OFF_LAST, 0).takeIf { it > offAt }?.let { " (последний ${fmt(it)})" } ?: "")
+        }
         lines += "Последнее оповещение: ${fmt(p.getLong(KEY_LAST_ALERT, 0))}"
         lines += "Wi-Fi подключение: ${p.getString(KEY_CONN, null) ?: "—"}"
         p.getString(KEY_EVENTS, null)?.takeIf { it.isNotBlank() }?.let { lines += "События:\n$it" }

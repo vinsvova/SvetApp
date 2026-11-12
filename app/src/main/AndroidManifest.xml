@@ -55,6 +55,14 @@
             android:turnScreenOn="true"
             tools:targetApi="27" />
 
+        <activity
+            android:name=".BlackScreenActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:screenOrientation="unspecified"
+            android:theme="@style/Theme.SvetApp.Black" />
+
         <service
             android:name=".WifiWatcherService"
             android:exported="false"

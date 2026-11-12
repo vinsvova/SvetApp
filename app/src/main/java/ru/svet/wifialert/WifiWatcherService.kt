@@ -97,9 +97,11 @@ class WifiWatcherService : Service() {
     private val handler = Handler(Looper.getMainLooper())
     private var player: MediaPlayer? = null
 
-    private var networkVisible = false
+    /** -1 — ещё не знаем, 0 — сети нет, 1 — сеть есть. Хранится в Prefs, переживает перезапуск. */
+    private var state = -1
+    private val networkVisible get() = state == 1
     private var misses = 0
-    private var lostAt = 0L            // когда сеть пропала (elapsedRealtime)
+    private var lostAt = 0L            // когда сеть пропала (System.currentTimeMillis)
     private var lastScanAttempt = 0L
     private var lastFreshScanTs = 0L   // время самого свежего результата скана, мкс
     private var connectedTarget: Network? = null
@@ -133,11 +135,19 @@ class WifiWatcherService : Service() {
         override fun onReceive(context: Context, intent: Intent) = checkResults()
     }
 
+    private val screenReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action == Intent.ACTION_SCREEN_OFF) Prefs.screenOff(context)
+        }
+    }
+
     // ---------- Жизненный цикл ----------
 
     override fun onCreate() {
         super.onCreate()
         wifi = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
+        state = Prefs.state(this)
+        lostAt = Prefs.lostAt(this)
         createChannels()
         goForeground()
 
@@ -156,6 +166,9 @@ class WifiWatcherService : Service() {
             this, scanReceiver,
             IntentFilter(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION),
             ContextCompat.RECEIVER_EXPORTED // системный broadcast
+        )
+        ContextCompat.registerReceiver(
+            this, screenReceiver, IntentFilter(Intent.ACTION_SCREEN_OFF), ContextCompat.RECEIVER_EXPORTED
         )
         connectivity = getSystemService(ConnectivityManager::class.java)
         runCatching {
@@ -191,6 +204,7 @@ class WifiWatcherService : Service() {
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
         runCatching { unregisterReceiver(scanReceiver) }
+        runCatching { unregisterReceiver(screenReceiver) }
         runCatching { connectivity.unregisterNetworkCallback(netCallback) }
         AlarmReceiver.cancelTick(this)
         stopSound()
@@ -252,7 +266,12 @@ class WifiWatcherService : Service() {
             // Пока планшет подключён к нужной сети, она точно есть
             if (misses >= MISSES_TO_RESET && connectedTarget == null) onAbsent("скан")
         }
-        if (newest > lastFreshScanTs) lastFreshScanTs = newest
+        if (newest > lastFreshScanTs) {
+            if (lastFreshScanTs > 0 && !(getSystemService(POWER_SERVICE) as PowerManager).isInteractive) {
+                Prefs.countScreenOffScan(this) // новый скан при выключенном экране
+            }
+            lastFreshScanTs = newest
+        }
         updateServiceNotification()
     }
 
@@ -273,31 +292,29 @@ class WifiWatcherService : Service() {
 
     private fun onPresent(source: String) {
         misses = 0
-        if (networkVisible) return
-        networkVisible = true
-        val now = SystemClock.elapsedRealtime()
-        val shortBlip = lostAt != 0L && now - lostAt < MIN_OUTAGE_MS
-        Prefs.logEvent(this, "сеть появилась ($source)" + if (shortBlip) ", кратковременно — без оповещения" else "")
-        if (!shortBlip) alertViaAlarm()
+        if (state == 1) return
+        val wasUnknown = state == -1
+        state = 1
+        Prefs.saveState(this, state, lostAt)
+        if (wasUnknown) {
+            Prefs.logEvent(this, "сеть уже есть при запуске — без оповещения")
+        } else {
+            val shortBlip = lostAt != 0L && System.currentTimeMillis() - lostAt < MIN_OUTAGE_MS
+            Prefs.logEvent(this, "сеть появилась ($source)" + if (shortBlip) ", кратковременно — без оповещения" else "")
+            if (!shortBlip) alertViaAlarm()
+        }
         updateServiceNotification()
     }
 
     private fun onAbsent(source: String) {
         misses = 0
-        if (!networkVisible) return
-        networkVisible = false
-        lostAt = SystemClock.elapsedRealtime()
-        Prefs.logEvent(this, "сеть пропала ($source)")
+        if (state == 0) return
+        val wasUnknown = state == -1
+        state = 0
+        lostAt = if (wasUnknown) 0L else System.currentTimeMillis()
+        Prefs.saveState(this, state, lostAt)
+        Prefs.logEvent(this, if (wasUnknown) "сети нет при запуске — жду" else "сеть пропала ($source)")
         updateServiceNotification()
-    }
-
-    private fun ssidOf(r: android.net.wifi.ScanResult): String {
-        val raw = if (Build.VERSION.SDK_INT >= 33) {
-            r.wifiSsid?.toString() ?: ""
-        } else {
-            @Suppress("DEPRECATION") r.SSID ?: ""
-        }
-        return raw.trim().removeSurrounding("\"")
     }
 
     // ---------- Срабатывание ----------
@@ -431,11 +448,11 @@ class WifiWatcherService : Service() {
 
     private fun buildServiceNotification(): Notification {
         val ssid = Prefs.ssid(this)
-        val state = if (networkVisible) "сеть рядом ✅" else "сети пока нет"
+        val text = if (networkVisible) "сеть рядом ✅" else "сети пока нет"
         return NotificationCompat.Builder(this, CH_SERVICE)
             .setSmallIcon(R.drawable.ic_light)
             .setContentTitle("Жду Wi-Fi «$ssid»")
-            .setContentText(state)
+            .setContentText(text)
             .setOngoing(true)
             .setContentIntent(openAppIntent())
             .build()

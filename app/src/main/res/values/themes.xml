@@ -2,4 +2,8 @@
     <style name="Theme.SvetApp" parent="Theme.Material3.DayNight.NoActionBar">
         <item name="colorPrimary">#F2A900</item>
     </style>
+    <style name="Theme.SvetApp.Black" parent="Theme.SvetApp">
+        <item name="android:windowBackground">#000000</item>
+        <item name="android:windowFullscreen">true</item>
+    </style>
 </resources>

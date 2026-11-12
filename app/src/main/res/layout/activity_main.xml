@@ -53,6 +53,19 @@
             android:layout_height="wrap_content"
             android:text="Тест через 15 секунд (выключите экран)" />
 
+        <Button
+            android:id="@+id/black"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="Чёрный экран (надёжное слежение)" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Huawei не ищет Wi-Fi при выключенном экране. Чёрный экран держит экран формально включённым на минимальной яркости. Лучше держать планшет на зарядке. Выход — двойное касание."
+            android:textSize="12sp" />
+
         <TextView
             android:id="@+id/status"
             android:layout_width="match_parent"

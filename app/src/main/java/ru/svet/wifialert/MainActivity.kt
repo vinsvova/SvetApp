@@ -74,6 +74,13 @@ class MainActivity : AppCompatActivity() {
                 toast("Выключите экран кнопкой питания и ждите 15 секунд")
             } else toast("Сначала нажмите «Начать слежение» и выдайте разрешения")
         }
+        findViewById<Button>(R.id.black).setOnClickListener {
+            if (!Prefs.enabled(this)) {
+                toast("Сначала нажмите «Начать слежение»")
+            } else {
+                startActivity(Intent(this, BlackScreenActivity::class.java))
+            }
+        }
         findViewById<Button>(R.id.fullScreen).setOnClickListener { requestFullScreen() }
         findViewById<Button>(R.id.notifSettings).setOnClickListener {
             startActivity(
@@ -128,6 +135,7 @@ class MainActivity : AppCompatActivity() {
                 .setNegativeButton("Отмена", null)
                 .show()
         }
+        Prefs.resetState(this) // первое наблюдение — без оповещения
         Prefs.setEnabled(this, true)
         WifiWatcherService.start(this)
         if (!isIgnoringBattery()) requestIgnoreBattery()
