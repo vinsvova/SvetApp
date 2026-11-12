@@ -1,7 +1,6 @@
 package ru.svet.wifialert
 
 import android.annotation.SuppressLint
-import android.app.AlarmManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -22,7 +21,6 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
-import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
@@ -36,7 +34,8 @@ import androidx.core.content.ContextCompat
  * Для прошивок, которые усыпляют фон (Huawei, Xiaomi…), используются сразу три механизма:
  *  - partial wake lock: процессор не засыпает;
  *  - Wi-Fi lock: Wi-Fi не отключается при выключенном экране;
- *  - AlarmManager: будит сервис раз в минуту, даже если обычный таймер «заморозили».
+ *  - AlarmManager.setAlarmClock: будит планшет раз в минуту, как приложение «Часы»
+ *    (на Huawei обычные таймеры в глубоком сне не срабатывают).
  */
 class WifiWatcherService : Service() {
 
@@ -53,8 +52,7 @@ class WifiWatcherService : Service() {
 
         const val ACTION_TEST = "ru.svet.wifialert.TEST"
         const val ACTION_STOP_SOUND = "ru.svet.wifialert.STOP_SOUND"
-        private const val ACTION_TICK = "ru.svet.wifialert.TICK"
-        const val EXTRA_DELAY_MS = "delay"
+        const val ACTION_TICK = "ru.svet.wifialert.TICK"
 
         fun start(ctx: Context) {
             ContextCompat.startForegroundService(ctx, Intent(ctx, WifiWatcherService::class.java))
@@ -65,10 +63,14 @@ class WifiWatcherService : Service() {
         }
 
         fun test(ctx: Context, delayMs: Long = 0) {
-            ContextCompat.startForegroundService(
-                ctx, Intent(ctx, WifiWatcherService::class.java)
-                    .setAction(ACTION_TEST).putExtra(EXTRA_DELAY_MS, delayMs)
-            )
+            if (delayMs > 0) {
+                // Через системный будильник — сработает и в глубоком сне
+                AlarmReceiver.schedule(ctx, AlarmReceiver.ACTION_TEST, delayMs)
+            } else {
+                ContextCompat.startForegroundService(
+                    ctx, Intent(ctx, WifiWatcherService::class.java).setAction(ACTION_TEST)
+                )
+            }
         }
 
         fun stopSound(ctx: Context) {
@@ -99,13 +101,6 @@ class WifiWatcherService : Service() {
         override fun onReceive(context: Context, intent: Intent) = checkResults()
     }
 
-    private val tickReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context, intent: Intent) {
-            scheduleTick()
-            handler.post(scanLoop) // перезапускаем цикл, если его «заморозили»
-        }
-    }
-
     // ---------- Жизненный цикл ----------
 
     override fun onCreate() {
@@ -115,7 +110,7 @@ class WifiWatcherService : Service() {
         goForeground()
 
         val pm = getSystemService(POWER_SERVICE) as PowerManager
-        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Svet::Watcher").apply {
+        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, AlarmReceiver.HUAWEI_SAFE_TAG).apply {
             setReferenceCounted(false)
             acquire()
         }
@@ -130,9 +125,6 @@ class WifiWatcherService : Service() {
             IntentFilter(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION),
             ContextCompat.RECEIVER_EXPORTED // системный broadcast
         )
-        ContextCompat.registerReceiver(
-            this, tickReceiver, IntentFilter(ACTION_TICK), ContextCompat.RECEIVER_NOT_EXPORTED
-        )
         scheduleTick()
         handler.post(scanLoop)
     }
@@ -140,9 +132,14 @@ class WifiWatcherService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         goForeground()
         when (intent?.action) {
-            ACTION_TEST -> {
-                val delay = intent.getLongExtra(EXTRA_DELAY_MS, 0)
-                handler.postDelayed({ alert() }, delay)
+            ACTION_TEST -> alert()
+            ACTION_TICK -> {
+                // Разбудил системный будильник: держим процессор, пока придут результаты скана
+                (getSystemService(POWER_SERVICE) as PowerManager)
+                    .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, AlarmReceiver.HUAWEI_SAFE_TAG)
+                    .acquire(20_000)
+                scheduleTick()
+                handler.post(scanLoop)
             }
             ACTION_STOP_SOUND -> {
                 stopSound()
@@ -155,8 +152,7 @@ class WifiWatcherService : Service() {
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
         runCatching { unregisterReceiver(scanReceiver) }
-        runCatching { unregisterReceiver(tickReceiver) }
-        runCatching { (getSystemService(ALARM_SERVICE) as AlarmManager).cancel(tickIntent()) }
+        AlarmReceiver.cancelTick(this)
         stopSound()
         wifiLock?.let { if (it.isHeld) it.release() }
         wakeLock?.let { if (it.isHeld) it.release() }
@@ -167,19 +163,8 @@ class WifiWatcherService : Service() {
 
     // ---------- Будильник-страховка ----------
 
-    private fun tickIntent(): PendingIntent = PendingIntent.getBroadcast(
-        this, 10, Intent(ACTION_TICK).setPackage(packageName),
-        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-    )
-
     private fun scheduleTick() {
-        val am = getSystemService(ALARM_SERVICE) as AlarmManager
-        val at = SystemClock.elapsedRealtime() + ALARM_INTERVAL_MS
-        val exactAllowed = Build.VERSION.SDK_INT < 31 || am.canScheduleExactAlarms()
-        runCatching {
-            if (exactAllowed) am.setExactAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, at, tickIntent())
-            else am.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, at, tickIntent())
-        }
+        if (Prefs.enabled(this)) AlarmReceiver.schedule(this, AlarmReceiver.ACTION_TICK, ALARM_INTERVAL_MS)
     }
 
     // ---------- Сканирование ----------
@@ -240,6 +225,9 @@ class WifiWatcherService : Service() {
 
     private fun alert() {
         Prefs.logAlert(this)
+        (getSystemService(POWER_SERVICE) as PowerManager)
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, AlarmReceiver.HUAWEI_SAFE_TAG)
+            .acquire(30_000)
         wakeScreen()
         showAlertNotification()
         playSound()
