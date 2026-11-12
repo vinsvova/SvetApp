@@ -21,7 +21,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
-            android:text="Когда рядом появится указанная Wi-Fi сеть, телефон покажет уведомление и скажет: «Да, будет свет в вашем доме»." />
+            android:text="Когда рядом появится указанная Wi-Fi сеть, телефон покажет уведомление «Да, будет свет в вашем доме» и проиграет звук." />
 
         <EditText
             android:id="@+id/ssid"
@@ -44,7 +44,7 @@
             style="@style/Widget.Material3.Button.OutlinedButton"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Проверить фразу и уведомление" />
+            android:text="Проверить звук и уведомление" />
 
         <TextView
             android:id="@+id/status"

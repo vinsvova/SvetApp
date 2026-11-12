@@ -12,26 +12,25 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.media.AudioAttributes
+import android.media.MediaPlayer
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
-import android.speech.tts.TextToSpeech
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
-import java.util.Locale
 
 /**
  * Фоновый сервис: каждые SCAN_INTERVAL_MS запускает поиск Wi-Fi сетей.
  * Когда нужная сеть ПОЯВЛЯЕТСЯ (раньше её не было) — показывает уведомление
- * и произносит фразу. Повторно сработает только после того, как сеть пропадёт
+ * и проигрывает звук (res/raw/svet_sound.mp3). Повторно сработает только после того, как сеть пропадёт
  * и появится снова.
  */
-class WifiWatcherService : Service(), TextToSpeech.OnInitListener {
+class WifiWatcherService : Service() {
 
     companion object {
         private const val TAG = "SvetWatcher"
@@ -67,9 +66,7 @@ class WifiWatcherService : Service(), TextToSpeech.OnInitListener {
     private var wakeLock: PowerManager.WakeLock? = null
     private val handler = Handler(Looper.getMainLooper())
 
-    private var tts: TextToSpeech? = null
-    private var ttsReady = false
-    private var pendingSpeak = false
+    private var player: MediaPlayer? = null
 
     private var networkVisible = false
     private var misses = 0
@@ -104,8 +101,6 @@ class WifiWatcherService : Service(), TextToSpeech.OnInitListener {
             acquire()
         }
 
-        tts = TextToSpeech(this, this)
-
         ContextCompat.registerReceiver(
             this, scanReceiver,
             IntentFilter(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION),
@@ -123,7 +118,7 @@ class WifiWatcherService : Service(), TextToSpeech.OnInitListener {
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
         runCatching { unregisterReceiver(scanReceiver) }
-        tts?.shutdown()
+        stopSound()
         wakeLock?.let { if (it.isHeld) it.release() }
         super.onDestroy()
     }
@@ -175,40 +170,30 @@ class WifiWatcherService : Service(), TextToSpeech.OnInitListener {
 
     private fun alert() {
         showAlertNotification()
-        speak()
+        playSound()
     }
 
-    private fun speak() {
-        if (!ttsReady) {
-            pendingSpeak = true
-            return
+    private fun playSound() {
+        stopSound()
+        // Канал "будильник": звук слышен при выключенном экране и в беззвучном режиме
+        val attrs = AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_ALARM)
+            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+            .build()
+        player = MediaPlayer.create(this, R.raw.svet_sound, attrs, 0)?.apply {
+            setWakeMode(this@WifiWatcherService, PowerManager.PARTIAL_WAKE_LOCK)
+            setOnCompletionListener { stopSound() }
+            start()
         }
-        tts?.speak(Prefs.PHRASE, TextToSpeech.QUEUE_FLUSH, null, "svet")
+        if (player == null) Log.e(TAG, "Не удалось открыть звуковой файл")
     }
 
-    override fun onInit(status: Int) {
-        if (status != TextToSpeech.SUCCESS) {
-            Log.e(TAG, "TTS init failed: $status")
-            return
+    private fun stopSound() {
+        player?.let {
+            runCatching { if (it.isPlaying) it.stop() }
+            it.release()
         }
-        tts?.apply {
-            val res = setLanguage(Locale("ru", "RU"))
-            if (res == TextToSpeech.LANG_MISSING_DATA || res == TextToSpeech.LANG_NOT_SUPPORTED) {
-                Log.e(TAG, "Русский голос не установлен")
-            }
-            // Канал "будильник": фраза слышна даже при выключенном экране
-            setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_ALARM)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                    .build()
-            )
-        }
-        ttsReady = true
-        if (pendingSpeak) {
-            pendingSpeak = false
-            speak()
-        }
+        player = null
     }
 
     // ---------- Уведомления ----------
