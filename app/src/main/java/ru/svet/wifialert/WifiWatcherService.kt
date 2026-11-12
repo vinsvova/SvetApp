@@ -15,12 +15,17 @@ import android.media.AudioAttributes
 import android.media.AudioManager
 import android.media.MediaPlayer
 import android.media.RingtoneManager
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
@@ -46,9 +51,15 @@ class WifiWatcherService : Service() {
         private const val ID_SERVICE = 1
         const val ID_ALERT = 2
 
-        private const val SCAN_INTERVAL_MS = 30_000L
+        /** Android разрешает 4 скана за 2 минуты — держимся чуть реже. */
+        private const val SCAN_INTERVAL_MS = 35_000L
+        private const val MIN_SCAN_GAP_MS = 30_000L
+        /** Результат скана старше этого считается устаревшим (кэш). */
+        private const val FRESH_MS = 45_000L
+        /** Если сеть вернулась быстрее — это не отключение света, а помеха. */
+        private const val MIN_OUTAGE_MS = 60_000L
         private const val ALARM_INTERVAL_MS = 60_000L
-        private const val MISSES_TO_RESET = 3
+        private const val MISSES_TO_RESET = 2
 
         const val ACTION_TEST = "ru.svet.wifialert.TEST"
         const val ACTION_STOP_SOUND = "ru.svet.wifialert.STOP_SOUND"
@@ -88,6 +99,27 @@ class WifiWatcherService : Service() {
 
     private var networkVisible = false
     private var misses = 0
+    private var lostAt = 0L            // когда сеть пропала (elapsedRealtime)
+    private var lastScanAttempt = 0L
+    private var lastFreshScanTs = 0L   // время самого свежего результата скана, мкс
+    private var connectedTarget: Network? = null
+
+    private lateinit var connectivity: ConnectivityManager
+
+    /** Второй способ: планшет сам подключился к нужной (сохранённой) сети. */
+    private val netCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) = checkConnection(network)
+        override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) =
+            checkConnection(network)
+
+        override fun onLost(network: Network) {
+            if (network == connectedTarget) {
+                connectedTarget = null
+                Prefs.logConnection(this@WifiWatcherService, "отключился")
+                handler.post { onAbsent("отключение") }
+            }
+        }
+    }
 
     private val scanLoop = object : Runnable {
         override fun run() {
@@ -125,6 +157,13 @@ class WifiWatcherService : Service() {
             IntentFilter(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION),
             ContextCompat.RECEIVER_EXPORTED // системный broadcast
         )
+        connectivity = getSystemService(ConnectivityManager::class.java)
+        runCatching {
+            connectivity.registerNetworkCallback(
+                NetworkRequest.Builder().addTransportType(NetworkCapabilities.TRANSPORT_WIFI).build(),
+                netCallback
+            )
+        }
         scheduleTick()
         handler.post(scanLoop)
     }
@@ -152,6 +191,7 @@ class WifiWatcherService : Service() {
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
         runCatching { unregisterReceiver(scanReceiver) }
+        runCatching { connectivity.unregisterNetworkCallback(netCallback) }
         AlarmReceiver.cancelTick(this)
         stopSound()
         wifiLock?.let { if (it.isHeld) it.release() }
@@ -170,6 +210,9 @@ class WifiWatcherService : Service() {
     // ---------- Сканирование ----------
 
     private fun requestScan() {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastScanAttempt < MIN_SCAN_GAP_MS) return // не тратим лимит сканов зря
+        lastScanAttempt = now
         try {
             @Suppress("DEPRECATION")
             val started = wifi.startScan()
@@ -192,23 +235,59 @@ class WifiWatcherService : Service() {
             Prefs.logError(this, "нет разрешения на список сетей")
             return
         }
-        val names = results.map { ssidOf(it) }.filter { it.isNotEmpty() }.distinct()
+        // Время результатов — в микросекундах с момента загрузки. Берём только свежие.
+        val nowUs = SystemClock.elapsedRealtime() * 1000
+        val newest = results.maxOfOrNull { it.timestamp } ?: 0L
+        val fresh = results.filter { nowUs - it.timestamp < FRESH_MS * 1000 }
+        val names = fresh.map { ssidOf(it) }.filter { it.isNotEmpty() }.distinct()
         val found = names.any { it.equals(target, ignoreCase = true) }
-        Prefs.logResults(this, names, found)
+        val ageSec = if (newest > 0) (nowUs - newest) / 1_000_000 else -1
+        Prefs.logResults(this, names, found, ageSec)
 
         if (found) {
-            misses = 0
-            if (!networkVisible) {
-                networkVisible = true
-                alert()
-            }
-        } else if (networkVisible) {
+            onPresent("скан")
+        } else if (newest > lastFreshScanTs && fresh.isNotEmpty()) {
+            // Пришёл НОВЫЙ скан, и сети в нём нет
             misses++
-            if (misses >= MISSES_TO_RESET) {
-                networkVisible = false
-                misses = 0
+            // Пока планшет подключён к нужной сети, она точно есть
+            if (misses >= MISSES_TO_RESET && connectedTarget == null) onAbsent("скан")
+        }
+        if (newest > lastFreshScanTs) lastFreshScanTs = newest
+        updateServiceNotification()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun checkConnection(network: Network) {
+        val target = Prefs.ssid(this)
+        if (target.isEmpty()) return
+        val ssid = runCatching { wifi.connectionInfo?.ssid }.getOrNull()
+            ?.trim()?.removeSurrounding("\"") ?: return
+        if (ssid.equals(target, ignoreCase = true)) {
+            if (connectedTarget != network) {
+                connectedTarget = network
+                Prefs.logConnection(this, "подключён к «$ssid»")
+                handler.post { onPresent("подключение") }
             }
         }
+    }
+
+    private fun onPresent(source: String) {
+        misses = 0
+        if (networkVisible) return
+        networkVisible = true
+        val now = SystemClock.elapsedRealtime()
+        val shortBlip = lostAt != 0L && now - lostAt < MIN_OUTAGE_MS
+        Prefs.logEvent(this, "сеть появилась ($source)" + if (shortBlip) ", кратковременно — без оповещения" else "")
+        if (!shortBlip) alert()
+        updateServiceNotification()
+    }
+
+    private fun onAbsent(source: String) {
+        misses = 0
+        if (!networkVisible) return
+        networkVisible = false
+        lostAt = SystemClock.elapsedRealtime()
+        Prefs.logEvent(this, "сеть пропала ($source)")
         updateServiceNotification()
     }
 
