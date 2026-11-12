@@ -317,6 +317,15 @@ class WifiWatcherService : Service() {
         updateServiceNotification()
     }
 
+    private fun ssidOf(r: android.net.wifi.ScanResult): String {
+        val raw = if (Build.VERSION.SDK_INT >= 33) {
+            r.wifiSsid?.toString() ?: ""
+        } else {
+            @Suppress("DEPRECATION") r.SSID ?: ""
+        }
+        return raw.trim().removeSurrounding("\"")
+    }
+
     // ---------- Срабатывание ----------
 
     private var alertPending = false
